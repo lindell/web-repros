@@ -1,5 +1,6 @@
-/index.html
+/dip-data.html
   Document-Isolation-Policy: isolate-and-require-corp
 
-/
-  Document-Isolation-Policy: isolate-and-require-corp
+/coep-coop-data.html
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Opener-Policy: same-origin
