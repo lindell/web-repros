@@ -4,3 +4,6 @@
 /coep-coop-data.html
   Cross-Origin-Embedder-Policy: require-corp
   Cross-Origin-Opener-Policy: same-origin
+
+/agent-cluster-data.html
+  Origin-Agent-Cluster: ?1
