@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Base64 Test</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Checkerboard pattern to show transparency */
+        .bg-checkerboard {
+            background-color: #ffffff;
+            background-image: 
+                linear-gradient(45deg, #e2e8f0 25%, transparent 25%), 
+                linear-gradient(-45deg, #e2e8f0 25%, transparent 25%), 
+                linear-gradient(45deg, transparent 75%, #e2e8f0 75%), 
+                linear-gradient(-45deg, transparent 75%, #e2e8f0 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen flex items-center justify-center p-4">
+
+    <div class="bg-white p-8 rounded-2xl shadow-lg border border-slate-200">
+        <!-- Image Container with Checkerboard Background -->
+        <!-- w-24 h-24 ensures the background is exactly the same size as the image -->
+        <div class="bg-checkerboard rounded-lg border border-slate-300 shadow-sm w-24 h-24 overflow-hidden">
+            <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADIAAAAyCAYAAAAeP4ixAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAJwSURBVHgB7VdLjtwwCEXR5/wLdoMewOwwO0w36AHMDtMNegCzw/QAdh/Fw/GjOqVColJAPxCRCt/z+IhsJp9fX1/b7Xb7sd/vP64/fr8Ktt1un5+fn9+Xy+Xz9Xq9P+b5/v4+v76+Pj4/P9t+v/8s/r+Y5+12+1wuF/sC5fPz004I4DOfz2f7+vr6LID/Pj8/2+v1ai/c7/f2er3+k3kY+36/7Q1G9F2v1/Z8Pttut7P3C2zGe/X9frfP52M/3D8Y0fcw5vF4tOfz2d7f39vj8WjP57O9v7+3x+PRv8V6Wq+N6HsY02q1MN/v9/Z4PNpms7Fut/5W62m9NqLvYUyr1cJ8vV7t8Xiwb7ebrdf/VutpvTbi72BMq9XCPJ/P9ng82mazsW63/lbrab02ou9hTKvVwnx/f7fH49E2m411u/W3Wk/rtRF9D2NarRbm+Xy2x+PRNpuNdbv1t1pP67URfQ9jWq0W5vv9bo/Ho202G+t262+1ntZrI/oexrRaLczz+WyPx6NtNhvrdutvtZ7WayP6Hsa0Wi3M9/t9fow9Ho/2fD7b+/t7ezwe7fl8tvf39/Z4PPq3WE/rtRF9D2Mej8d5TNy/2+3a5/O5+P/9frfP59O/xXpar43oexjDeP/4+Fif436/t9fr1b/Feg6wEX0PY1C1Wj0G8JnP5/P83+v1ai/8N/Mwlteq4z3i/4v1tF4b0fcw5vH4/W+s8b/Vep79N6LvYcz/uVqt59l/I/oexvC663j/+I/4/2I9rddG9D2M4f2q4/3jP+L/i/W0XhvR9zCG96uO94//iP8v1tN6bUTfwxjerzreP/4j/r9YT+u1EX2P+QJ2u87N4v50OgAAAABJRU5ErkJggg==" 
+                 alt="Base64 Content" 
+                 class="w-full h-full object-contain block" />
+        </div>
+    </div>
+
+</body>
+</html>

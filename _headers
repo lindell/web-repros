@@ -1,0 +1,5 @@
+/index.html
+  Document-Isolation-Policy: isolate-and-require-corp
+
+/
+  Document-Isolation-Policy: isolate-and-require-corp
