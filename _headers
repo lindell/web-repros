@@ -1,6 +1,9 @@
 /dip-data.html
   Document-Isolation-Policy: isolate-and-require-corp
 
+/auto-crash.html
+  Document-Isolation-Policy: isolate-and-require-corp
+
 /coep-coop-data.html
   Cross-Origin-Embedder-Policy: require-corp
   Cross-Origin-Opener-Policy: same-origin
