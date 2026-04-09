@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebAssembly Deadlock Reproducer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .spin-fast {
+            animation: spin 0.5s linear infinite;
+        }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .pulse-fast {
+            animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .5; }
+        }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-200 min-h-screen font-sans flex flex-col p-6">
+    <div class="max-w-4xl mx-auto w-full flex-grow flex flex-col gap-6">
+        
+        <!-- Header -->
+        <header class="bg-slate-800 rounded-xl p-6 shadow-lg border border-slate-700">
+            <h1 class="text-3xl font-bold text-white mb-2 flex items-center gap-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-blue-500"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg>
+                WebAssembly Engine Stress Test
+            </h1>
+            <p class="text-slate-400">
+                This tool attempts to reproduce a deadlock in JavaScript engines by continuously running <code class="text-blue-400 bg-slate-900 px-1 rounded">WebAssembly.validate</code> on the main thread, while simultaneously firing <code class="text-blue-400 bg-slate-900 px-1 rounded">WebAssembly.compile</code> across multiple Web Workers. 
+                Unique WebAssembly binaries are generated on the fly to bypass module caching.
+            </p>
+        </header>
+
+        <!-- Controls & Status -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            
+            <!-- Controls -->
+            <div class="bg-slate-800 rounded-xl p-6 shadow-lg border border-slate-700 flex flex-col gap-4">
+                <h2 class="text-xl font-semibold text-white border-b border-slate-700 pb-2">Controls</h2>
+                
+                <div class="flex flex-col gap-2">
+                    <label for="workerCount" class="text-sm font-medium text-slate-300">Number of Workers</label>
+                    <input type="number" id="workerCount" min="1" max="32" value="4" 
+                        class="bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors">
+                    <p class="text-xs text-slate-500">More workers = higher concurrency pressure.</p>
+                </div>
+
+                <div class="flex gap-3 mt-auto pt-4">
+                    <button id="startBtn" onclick="startStressTest()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-4 rounded-lg transition-colors shadow-lg shadow-blue-900/50 flex justify-center items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                        Start
+                    </button>
+                    <button id="stopBtn" onclick="stopStressTest()" disabled class="flex-1 bg-red-600/50 text-red-200 cursor-not-allowed font-bold py-2 px-4 rounded-lg transition-colors flex justify-center items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="5" y="5" rx="1"/></svg>
+                        Stop
+                    </button>
+                </div>
+            </div>
+
+            <!-- Main Thread Metrics -->
+            <div class="bg-slate-800 rounded-xl p-6 shadow-lg border border-slate-700 flex flex-col gap-4 relative overflow-hidden">
+                <div class="absolute top-0 right-0 p-4">
+                    <div id="mainStatusIcon" class="h-3 w-3 rounded-full bg-slate-600"></div>
+                </div>
+                <h2 class="text-xl font-semibold text-white border-b border-slate-700 pb-2">Main Thread</h2>
+                
+                <div class="flex flex-col gap-1">
+                    <span class="text-sm text-slate-400">Total Validations</span>
+                    <span id="mainValidations" class="text-3xl font-mono text-blue-400">0</span>
+                </div>
+
+                <div class="mt-auto bg-slate-900 rounded-lg p-3 border border-slate-700 flex items-center gap-3">
+                    <svg id="heartbeatSpinner" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-slate-500"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    <div class="flex flex-col">
+                        <span class="text-xs text-slate-500 uppercase tracking-wider">Event Loop Tick</span>
+                        <span id="tickCounter" class="text-sm font-mono text-slate-300">0</span>
+                    </div>
+                </div>
+                <p class="text-xs text-slate-500 mt-1">If the spinner and tick stop, the main thread is deadlocked.</p>
+            </div>
+
+            <!-- Worker Metrics -->
+            <div class="bg-slate-800 rounded-xl p-6 shadow-lg border border-slate-700 flex flex-col gap-4 relative overflow-hidden">
+                <div class="absolute top-0 right-0 p-4">
+                    <div id="workerStatusIcon" class="h-3 w-3 rounded-full bg-slate-600"></div>
+                </div>
+                <h2 class="text-xl font-semibold text-white border-b border-slate-700 pb-2">Workers</h2>
+                
+                <div class="flex flex-col gap-1">
+                    <span class="text-sm text-slate-400">Total Compilations</span>
+                    <span id="workerCompilations" class="text-3xl font-mono text-purple-400">0</span>
+                </div>
+
+                <div class="mt-auto flex flex-col gap-2">
+                    <div class="flex justify-between text-sm text-slate-400">
+                        <span>Active Workers:</span>
+                        <span id="activeWorkersDisplay" class="font-bold text-white">0</span>
+                    </div>
+                    <!-- Mini worker activity visualization -->
+                    <div id="workerViz" class="flex gap-1 h-6">
+                        <!-- Bars injected dynamically -->
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        // --- Core Application State ---
+        let isRunning = false;
+        let mainValidationCount = 0;
+        let totalWorkerCompilationCount = 0;
+        let workers = [];
+        let tickCount = 0;
+        let workerUrl = null;
+        let workerManagerTimer = null;
+        let vizBars = [];
+
+        // --- DOM Elements ---
+        const ui = {
+            workerCount: document.getElementById('workerCount'),
+            startBtn: document.getElementById('startBtn'),
+            stopBtn: document.getElementById('stopBtn'),
+            mainValidations: document.getElementById('mainValidations'),
+            workerCompilations: document.getElementById('workerCompilations'),
+            tickCounter: document.getElementById('tickCounter'),
+            heartbeatSpinner: document.getElementById('heartbeatSpinner'),
+            mainStatusIcon: document.getElementById('mainStatusIcon'),
+            workerStatusIcon: document.getElementById('workerStatusIcon'),
+            activeWorkersDisplay: document.getElementById('activeWorkersDisplay'),
+            workerViz: document.getElementById('workerViz')
+        };
+
+        // --- Wasm Generation Logic ---
+        // Generates a minimal valid WebAssembly module with a custom section 
+        // containing random bytes to guarantee a unique hash on every call, bypassing caches.
+        function generateUniqueWasm() {
+            // 8 bytes (Header) + 8 bytes (Custom Section) = 16 bytes
+            const wasm = new Uint8Array(16);
+            
+            // 1. Magic Number: \0asm
+            wasm[0] = 0x00; wasm[1] = 0x61; wasm[2] = 0x73; wasm[3] = 0x6D;
+            // 2. Version: 1
+            wasm[4] = 0x01; wasm[5] = 0x00; wasm[6] = 0x00; wasm[7] = 0x00;
+            
+            // 3. Custom Section (Section ID 0)
+            wasm[8] = 0x00; 
+            // Section Payload Size: 6 bytes 
+            wasm[9] = 0x06; 
+            // Name Length: 1 byte
+            wasm[10] = 0x01; 
+            // Name: 'r' (0x72)
+            wasm[11] = 0x72; 
+            
+            // 4. Random Payload (4 bytes)
+            wasm[12] = Math.floor(Math.random() * 256);
+            wasm[13] = Math.floor(Math.random() * 256);
+            wasm[14] = Math.floor(Math.random() * 256);
+            wasm[15] = Math.floor(Math.random() * 256);
+            
+            return wasm;
+        }
+
+        // --- Event Loop Heartbeat ---
+        // Continuously updates to prove the main thread is still responding.
+        function animateHeartbeat() {
+            tickCount++;
+            ui.tickCounter.innerText = tickCount.toLocaleString();
+            requestAnimationFrame(animateHeartbeat);
+        }
+        requestAnimationFrame(animateHeartbeat);
+
+        // --- Main Thread Spam Task ---
+        function spamMainThreadValidations() {
+            if (!isRunning) return;
+
+            const startTime = performance.now();
+            let batchCount = 0;
+
+            // Run intensive sync validation for ~10ms per frame to heavily pressure 
+            // the main thread without entirely preventing UI updates (unless it deadlocks).
+            while (performance.now() - startTime < 10) {
+                for (let i = 0; i < 50; i++) {
+                    WebAssembly.validate(generateUniqueWasm());
+                    batchCount++;
+                }
+            }
+
+            mainValidationCount += batchCount;
+            ui.mainValidations.innerText = mainValidationCount.toLocaleString();
+
+            // Schedule next execution immediately after the event loop processes rendering
+            if (isRunning) {
+                setTimeout(spamMainThreadValidations, 0);
+            }
+        }
+
+        // --- Worker Source Code ---
+        // Sent dynamically to workers via Blob URL.
+        const workerScript = `
+            // Inject the generator function into the worker
+            ${generateUniqueWasm.toString()}
+            
+            let running = false;
+            let batchSize = 25; // Smaller batch size to prevent rapid worker OOM
+
+            async function spamCompilations() {
+                if (!running) return;
+
+                let promises = [];
+                for (let i = 0; i < batchSize; i++) {
+                    promises.push(WebAssembly.compile(generateUniqueWasm()));
+                }
+
+                // Wait for all compilations in this batch
+                try {
+                    await Promise.allSettled(promises);
+                    postMessage({ type: 'progress', count: batchSize });
+                } catch (e) {
+                    console.error("Worker compile error:", e);
+                }
+
+                if (running) {
+                    // Yield to allow message processing
+                    setTimeout(spamCompilations, 0);
+                }
+            }
+
+            self.onmessage = function(e) {
+                if (e.data.type === 'start') {
+                    running = true;
+                    spamCompilations();
+                } else if (e.data.type === 'stop') {
+                    running = false;
+                }
+            };
+        `;
+
+        // --- Application Controls ---
+
+        function updateUIState(runningState) {
+            if (runningState) {
+                ui.startBtn.disabled = true;
+                ui.startBtn.classList.replace('bg-blue-600', 'bg-slate-700');
+                ui.startBtn.classList.replace('hover:bg-blue-500', 'cursor-not-allowed');
+                ui.startBtn.classList.replace('text-white', 'text-slate-500');
+
+                ui.stopBtn.disabled = false;
+                ui.stopBtn.classList.replace('bg-red-600/50', 'bg-red-600');
+                ui.stopBtn.classList.replace('cursor-not-allowed', 'hover:bg-red-500');
+                ui.stopBtn.classList.replace('text-red-200', 'text-white');
+
+                ui.workerCount.disabled = true;
+                ui.workerCount.classList.add('opacity-50');
+
+                ui.heartbeatSpinner.classList.add('spin-fast', 'text-green-500');
+                ui.heartbeatSpinner.classList.remove('text-slate-500');
+                
+                ui.mainStatusIcon.classList.replace('bg-slate-600', 'bg-green-500');
+                ui.mainStatusIcon.classList.add('pulse-fast');
+                
+                ui.workerStatusIcon.classList.replace('bg-slate-600', 'bg-purple-500');
+                ui.workerStatusIcon.classList.add('pulse-fast');
+
+            } else {
+                ui.startBtn.disabled = false;
+                ui.startBtn.classList.replace('bg-slate-700', 'bg-blue-600');
+                ui.startBtn.classList.replace('cursor-not-allowed', 'hover:bg-blue-500');
+                ui.startBtn.classList.replace('text-slate-500', 'text-white');
+
+                ui.stopBtn.disabled = true;
+                ui.stopBtn.classList.replace('bg-red-600', 'bg-red-600/50');
+                ui.stopBtn.classList.replace('hover:bg-red-500', 'cursor-not-allowed');
+                ui.stopBtn.classList.replace('text-white', 'text-red-200');
+
+                ui.workerCount.disabled = false;
+                ui.workerCount.classList.remove('opacity-50');
+
+                ui.heartbeatSpinner.classList.remove('spin-fast', 'text-green-500');
+                ui.heartbeatSpinner.classList.add('text-slate-500');
+                
+                ui.mainStatusIcon.classList.replace('bg-green-500', 'bg-slate-600');
+                ui.mainStatusIcon.classList.remove('pulse-fast');
+                
+                ui.workerStatusIcon.classList.replace('bg-purple-500', 'bg-slate-600');
+                ui.workerStatusIcon.classList.remove('pulse-fast');
+                
+                ui.activeWorkersDisplay.innerText = "0";
+                ui.workerViz.innerHTML = "";
+            }
+        }
+
+        function startStressTest() {
+            if (isRunning) return;
+            isRunning = true;
+            
+            // Reset counters
+            mainValidationCount = 0;
+            totalWorkerCompilationCount = 0;
+            ui.mainValidations.innerText = "0";
+            ui.workerCompilations.innerText = "0";
+
+            updateUIState(true);
+
+            // 1. Kick off Main Thread Spam
+            setTimeout(spamMainThreadValidations, 0);
+
+            // 2. Initialize and start Web Workers
+            const workerNum = parseInt(ui.workerCount.value) || 4;
+            const blob = new Blob([workerScript], { type: 'application/javascript' });
+            workerUrl = URL.createObjectURL(blob);
+            
+            ui.activeWorkersDisplay.innerText = workerNum;
+            ui.workerViz.innerHTML = "";
+            vizBars = [];
+
+            for (let i = 0; i < workerNum; i++) {
+                const worker = new Worker(workerUrl);
+                
+                // Add a visual bar for this worker
+                const vizBar = document.createElement('div');
+                vizBar.className = 'flex-1 bg-purple-900/50 rounded-sm transition-colors duration-100';
+                ui.workerViz.appendChild(vizBar);
+                vizBars.push(vizBar);
+
+                worker.onmessage = (e) => {
+                    if (e.data.type === 'progress') {
+                        totalWorkerCompilationCount += e.data.count;
+                        ui.workerCompilations.innerText = totalWorkerCompilationCount.toLocaleString();
+                        
+                        // Flash the viz bar to show activity
+                        vizBar.classList.add('bg-purple-400');
+                        setTimeout(() => vizBar.classList.remove('bg-purple-400'), 50);
+                    }
+                };
+
+                worker.postMessage({ type: 'start' });
+                workers.push(worker);
+            }
+
+            // 3. Start random worker killing/restarting
+            randomWorkerRestartLoop();
+        }
+
+        function randomWorkerRestartLoop() {
+            if (!isRunning) return;
+
+            // Random delay between 500ms and 1500ms
+            const delay = Math.random() * 1000 + 500;
+
+            workerManagerTimer = setTimeout(() => {
+                if (!isRunning || workers.length === 0) return;
+
+                // Pick a random worker index
+                const idx = Math.floor(Math.random() * workers.length);
+                
+                // Terminate the chosen worker
+                workers[idx].terminate();
+
+                // Flash the bar red to indicate it was killed
+                const vizBar = vizBars[idx];
+                vizBar.classList.remove('bg-purple-400', 'bg-purple-900/50');
+                vizBar.classList.add('bg-red-500');
+
+                setTimeout(() => {
+                    if (!isRunning) return;
+                    vizBar.classList.remove('bg-red-500');
+                    vizBar.classList.add('bg-purple-900/50');
+                }, 150);
+
+                // Restart it
+                const newWorker = new Worker(workerUrl);
+                newWorker.onmessage = (e) => {
+                    if (e.data.type === 'progress') {
+                        totalWorkerCompilationCount += e.data.count;
+                        ui.workerCompilations.innerText = totalWorkerCompilationCount.toLocaleString();
+                        
+                        vizBar.classList.add('bg-purple-400');
+                        setTimeout(() => vizBar.classList.remove('bg-purple-400'), 50);
+                    }
+                };
+                newWorker.postMessage({ type: 'start' });
+                
+                // Replace in array
+                workers[idx] = newWorker;
+
+                // Queue next random kill
+                randomWorkerRestartLoop();
+            }, delay);
+        }
+
+        function stopStressTest() {
+            if (!isRunning) return;
+            isRunning = false;
+            clearTimeout(workerManagerTimer);
+
+            // Terminate all workers to immediately clean up memory and processes
+            workers.forEach(w => w.terminate());
+            workers = [];
+            vizBars = [];
+
+            if (workerUrl) {
+                URL.revokeObjectURL(workerUrl);
+                workerUrl = null;
+            }
+
+            updateUIState(false);
+        }
+    </script>
+</body>
+</html>
