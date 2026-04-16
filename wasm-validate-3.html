@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebAssembly.validate() Deadlock POC</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes spin-slow {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .animate-spin-slow {
+            animation: spin-slow 2s linear infinite;
+        }
+        /* Custom scrollbar for logs */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1f2937; }
+        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col font-sans">
+
+    <div class="max-w-4xl mx-auto w-full p-6 flex-grow flex flex-col gap-6 mt-8">
+        
+        <!-- Header Section -->
+        <div class="bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700">
+            <h1 class="text-2xl font-bold text-red-400 mb-2">WebAssembly.validate() Deadlock POC</h1>
+            <p class="text-gray-300 text-sm">
+                This tool attempts to reproduce a suspected V8 deadlock by forcing heavy interaction between the main thread and background workers during a synchronous <code class="bg-gray-900 px-1 py-0.5 rounded text-blue-300">WebAssembly.validate()</code> call.
+            </p>
+            <p class="text-gray-400 text-xs mt-2 italic">
+                Warning: If the deadlock occurs, this tab will permanently freeze and you will need to forcefully close or reload it.
+            </p>
+        </div>
+
+        <!-- Controls & Status -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            
+            <div class="bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700">
+                <h2 class="text-lg font-semibold text-white mb-4">Configuration</h2>
+                
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-1">Wasm Function Count (triggers parallel validation)</label>
+                        <input type="number" id="funcCount" value="500000" class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500 transition-colors" />
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-1">Interference Workers Count</label>
+                        <input type="number" id="workerCount" value="8" class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500 transition-colors" />
+                    </div>
+                </div>
+
+                <button id="triggerBtn" class="mt-6 w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded transition-colors flex justify-center items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                    Start Continuous Test
+                </button>
+                <button id="abortBtn" disabled class="mt-2 w-full bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded transition-colors">
+                    Stop Test
+                </button>
+            </div>
+
+            <div class="bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700 flex flex-col items-center justify-center text-center">
+                <h2 class="text-lg font-semibold text-white mb-4">Main Thread Status</h2>
+                
+                <!-- Main thread responsiveness indicator -->
+                <div class="relative flex items-center justify-center w-24 h-24 mb-4">
+                    <div id="spinner" class="absolute inset-0 border-4 border-blue-500 border-t-transparent rounded-full animate-spin-slow"></div>
+                    <div id="statusIcon" class="text-3xl text-blue-400">⚡</div>
+            </div>
+            
+            <div class="text-sm text-gray-400 uppercase tracking-widest font-semibold">Frames Rendered</div>
+            <div id="frameCount" class="text-3xl font-mono text-white mt-1">0</div>
+            
+            <div class="text-sm text-gray-400 uppercase tracking-widest font-semibold mt-4">Validation Calls</div>
+            <div id="validationCountUI" class="text-3xl font-mono text-yellow-400 mt-1">0</div>
+
+            <p class="text-xs text-gray-500 mt-3 max-w-xs">
+                If this counter stops incrementing and the spinner halts, the main thread has deadlocked.
+            </p>
+        </div>
+    </div>
+
+    <!-- Logs -->
+        <div class="bg-gray-900 rounded-xl p-4 shadow-inner border border-gray-700 flex-grow flex flex-col font-mono text-sm">
+            <div class="flex justify-between items-center mb-2 text-gray-400">
+                <span>Execution Log</span>
+                <span id="msgQueueCount" class="text-xs text-yellow-500">Worker msgs: 0</span>
+            </div>
+            <div id="logArea" class="flex-grow overflow-y-auto space-y-1 h-64 text-green-400">
+                <div>> Ready. Waiting for trigger...</div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // --- 1. UI & State Management ---
+        let frames = 0;
+        let isRunning = false;
+        let workers = [];
+        let messagesReceived = 0;
+        let validationCount = 0;
+        
+        const dom = {
+            frameCount: document.getElementById('frameCount'),
+            validationCountUI: document.getElementById('validationCountUI'),
+            logArea: document.getElementById('logArea'),
+            triggerBtn: document.getElementById('triggerBtn'),
+            abortBtn: document.getElementById('abortBtn'),
+            funcCount: document.getElementById('funcCount'),
+            workerCount: document.getElementById('workerCount'),
+            msgQueueCount: document.getElementById('msgQueueCount'),
+            spinner: document.getElementById('spinner')
+        };
+
+        function log(msg, type = 'info') {
+            const el = document.createElement('div');
+            const time = new Date().toISOString().split('T')[1].slice(0, -1);
+            el.textContent = `[${time}] > ${msg}`;
+            if (type === 'error') el.className = 'text-red-400';
+            if (type === 'warn') el.className = 'text-yellow-400';
+            if (type === 'success') el.className = 'text-blue-400 font-bold';
+            
+            dom.logArea.appendChild(el);
+            dom.logArea.scrollTop = dom.logArea.scrollHeight;
+        }
+
+        // Render loop to prove main thread is alive
+        function animate() {
+            frames++;
+            dom.frameCount.textContent = frames;
+            requestAnimationFrame(animate);
+        }
+        requestAnimationFrame(animate);
+
+        // --- 2. Wasm Generator ---
+        // Generates a valid Wasm binary with a highly repetitive structure to trigger V8's parallel compilation
+        function encodeLEB128(value) {
+            const result = [];
+            do {
+                let byte = value & 0x7f;
+                value >>>= 7;
+                if (value !== 0) byte |= 0x80;
+                result.push(byte);
+            } while (value !== 0);
+            return result;
+        }
+
+        function generateMassiveWasm(funcCount) {
+            log(`Generating Wasm module with ${funcCount.toLocaleString()} functions...`);
+            
+            const magic = [0x00, 0x61, 0x73, 0x6d];
+            const version = [0x01, 0x00, 0x00, 0x00];
+            const typeSec = [0x01, 0x04, 0x01, 0x60, 0x00, 0x00]; // 1 type: () -> ()
+
+            const countLeb = encodeLEB128(funcCount);
+            
+            // Function section
+            const funcSecSize = countLeb.length + funcCount; 
+            const funcSecHeader = [0x03, ...encodeLEB128(funcSecSize)];
+
+            // Code section (each function is just an 'end' instruction: 0x02, 0x00, 0x0B)
+            const codePayloadSize = countLeb.length + (funcCount * 3);
+            const codeSecHeader = [0x0A, ...encodeLEB128(codePayloadSize)];
+
+            const totalSize = magic.length + version.length + typeSec.length +
+                              funcSecHeader.length + countLeb.length + funcCount +
+                              codeSecHeader.length + countLeb.length + (funcCount * 3);
+
+            const buffer = new Uint8Array(totalSize);
+            let offset = 0;
+
+            const write = (arr) => { buffer.set(arr, offset); offset += arr.length; };
+
+            write(magic);
+            write(version);
+            write(typeSec);
+
+            write(funcSecHeader);
+            write(countLeb);
+            for(let i=0; i<funcCount; i++) buffer[offset++] = 0x00; 
+
+            write(codeSecHeader);
+            write(countLeb);
+            for(let i=0; i<funcCount; i++) {
+                buffer[offset++] = 0x02; // size
+                buffer[offset++] = 0x00; // locals count
+                buffer[offset++] = 0x0B; // end opcode
+            }
+
+            log(`Wasm generation complete. Size: ${(buffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
+            return buffer;
+        }
+
+        // --- 3. Interference Workers ---
+        // Workers are designed to heavily allocate memory (GC pressure) and flood the main event loop
+        const workerScript = `
+            let running = false;
+            
+            self.onmessage = (e) => {
+                if (e.data === 'start') {
+                    running = true;
+                    busyLoop();
+                } else if (e.data === 'stop') {
+                    running = false;
+                }
+            };
+
+            function busyLoop() {
+                if (!running) return;
+
+                // 1. GC Pressure: Allocate and immediately discard large arrays
+                let garbage = [];
+                for (let i = 0; i < 2000; i++) {
+                    garbage.push(new Array(100).fill(Math.random()));
+                }
+                garbage = null;
+
+                // 2. Main Thread Event Loop Flood: Spam postMessage
+                for (let i = 0; i < 200; i++) {
+                    self.postMessage('spam');
+                }
+
+                // Yield to allow message dispatch, then continue
+                setTimeout(busyLoop, 1);
+            }
+        `;
+
+        function setupWorkers(count) {
+            log(`Spawning ${count} interference workers...`);
+            const blob = new Blob([workerScript], { type: 'application/javascript' });
+            const url = URL.createObjectURL(blob);
+            
+            for (let i = 0; i < count; i++) {
+                const w = new Worker(url);
+                w.onmessage = () => {
+                    if (!isRunning) return;
+                    messagesReceived++;
+                    if (messagesReceived % 5000 === 0) {
+                        dom.msgQueueCount.textContent = `Worker msgs: ${messagesReceived.toLocaleString()}`;
+                    }
+                };
+                workers.push(w);
+            }
+            log('Workers ready.', 'success');
+        }
+
+        function startInterference() {
+            log('Signaling workers to begin interference (GC + postMessage flood)...', 'warn');
+            workers.forEach(w => w.postMessage('start'));
+        }
+
+        function stopInterference() {
+            workers.forEach(w => w.postMessage('stop'));
+            workers.forEach(w => w.terminate());
+            workers = [];
+            messagesReceived = 0;
+            dom.msgQueueCount.textContent = 'Worker msgs: 0';
+        }
+
+        // --- 4. The Deadlock Sequence ---
+        async function runDeadlockTest() {
+            if (isRunning) return;
+            isRunning = true;
+            
+            dom.triggerBtn.disabled = true;
+            dom.abortBtn.disabled = false;
+            dom.spinner.classList.replace('border-blue-500', 'border-red-500');
+
+            const funcCount = parseInt(dom.funcCount.value, 10);
+            const workerCount = parseInt(dom.workerCount.value, 10);
+
+            // Give UI a moment to update before freezing
+            await new Promise(r => setTimeout(r, 100));
+
+            // 1. Prepare payload
+            const wasmBuffer = generateMassiveWasm(funcCount);
+
+            // 2. Spin up interference
+            setupWorkers(workerCount);
+            startInterference();
+
+            validationCount = 0;
+            dom.validationCountUI.textContent = '0';
+
+            log('Allowing 1 second for background workers to spin up before aggressive validation loop...');
+            
+            setTimeout(() => {
+                if (!isRunning) return;
+                log('🚨 Starting ultra-aggressive continuous validation loop...', 'warn');
+                scheduleNextValidation(wasmBuffer);
+            }, 1000);
+        }
+
+        function scheduleNextValidation(wasmBuffer) {
+            if (!isRunning) return;
+
+            // Yield just enough (e.g., 5ms) to let the event loop process worker 
+            // messages and render the next frame, then aggressively validate again.
+            setTimeout(() => {
+                if (!isRunning) return;
+
+                validationCount++;
+                dom.validationCountUI.textContent = validationCount;
+
+                const startTime = performance.now();
+                
+                // --- THE SUSPECTED DEADLOCK TRIGGER ---
+                const isValid = WebAssembly.validate(wasmBuffer);
+                // --------------------------------------
+
+                const duration = (performance.now() - startTime).toFixed(2);
+                
+                // Throttle logs to avoid DOM explosion from aggressive loop
+                if (validationCount % 25 === 0 || validationCount === 1) {
+                    if (isValid) {
+                        log(`[Attempt ${validationCount}] Validation completed in ${duration}ms.`, 'success');
+                    } else {
+                        log(`[Attempt ${validationCount}] Validation failed.`, 'error');
+                    }
+                }
+                
+                // Schedule the next cycle immediately
+                scheduleNextValidation(wasmBuffer);
+            }, 5);
+        }
+
+        function cleanup() {
+            isRunning = false;
+            stopInterference();
+            dom.triggerBtn.disabled = false;
+            dom.abortBtn.disabled = true;
+            dom.spinner.classList.replace('border-red-500', 'border-blue-500');
+            log('Test stopped. Environment cleaned up.');
+        }
+
+        // --- Event Listeners ---
+        dom.triggerBtn.addEventListener('click', runDeadlockTest);
+        dom.abortBtn.addEventListener('click', cleanup);
+
+    </script>
+</body>
+</html>
