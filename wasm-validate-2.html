@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>V8 WebAssembly Validation Race Condition POC</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col items-center justify-center p-6 font-sans">
+    
+    <div class="max-w-2xl w-full bg-gray-800 rounded-xl shadow-2xl p-8 border border-gray-700">
+        <h1 class="text-3xl font-bold text-white mb-4">V8 Wasm Validation Stress Test</h1>
+        <p class="text-gray-400 mb-6">
+            This POC reproduces a rare race condition in V8's <code class="bg-gray-700 px-1 py-0.5 rounded text-pink-400">DefaultJobState::Join</code>. 
+            It generates a valid Wasm module with 100 functions to force parallel background validation. 
+            By continuously validating from the main thread and a configurable number of Web Workers, it maximizes thread contention.
+        </p>
+
+        <!-- Configuration Settings -->
+        <div class="bg-gray-900 rounded-lg p-6 mb-8 border border-gray-700 flex flex-col sm:flex-row items-center justify-between">
+            <div class="mb-4 sm:mb-0">
+                <h3 class="text-lg font-bold text-white">Configuration</h3>
+                <p class="text-sm text-gray-400">Increase workers to maximize CPU contention.</p>
+            </div>
+            <div class="flex items-center gap-3">
+                <label for="worker-count" class="text-gray-300 font-semibold uppercase text-sm tracking-wider">Workers</label>
+                <input type="number" id="worker-count" min="1" max="1000" class="bg-gray-800 text-white border border-gray-600 rounded px-3 py-2 w-24 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-lg text-center">
+            </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-6 mb-8">
+            <div class="bg-gray-900 rounded-lg p-6 flex flex-col items-center border border-gray-700">
+                <span class="text-sm text-gray-500 uppercase tracking-wider font-semibold mb-2">Status</span>
+                <span id="status-indicator" class="text-2xl font-bold text-gray-500">STOPPED</span>
+            </div>
+            <div class="bg-gray-900 rounded-lg p-6 flex flex-col items-center border border-gray-700">
+                <span class="text-sm text-gray-500 uppercase tracking-wider font-semibold mb-2">Main Thread Validations</span>
+                <span id="validation-counter" class="text-3xl font-mono text-green-400">0</span>
+            </div>
+        </div>
+
+        <div class="flex gap-4 justify-center">
+            <button id="start-btn" class="bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-8 rounded-lg shadow-lg transition-colors focus:outline-none focus:ring-2 focus:ring-blue-400">
+                Start Stress Test
+            </button>
+            <button id="stop-btn" disabled class="bg-red-600 hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3 px-8 rounded-lg shadow-lg transition-colors focus:outline-none focus:ring-2 focus:ring-red-400">
+                Stop
+            </button>
+        </div>
+
+        <div class="mt-8 p-4 bg-yellow-900/30 border border-yellow-700/50 rounded-lg text-sm text-yellow-200">
+            <strong>Detection criteria:</strong> If the counter suddenly stops incrementing and this page becomes entirely unresponsive to clicks/scrolling, the deadlock has been triggered.
+        </div>
+    </div>
+
+    <script>
+        // --- WASM Generation ---
+        // Generates a valid Wasm module with 'n' functions to ensure V8 spawns parallel jobs.
+        function generateWasmWithNFunctions(n) {
+            // Leb128 encoder for sizes
+            function toLeb128(val) {
+                const res = [];
+                do {
+                    let byte = val & 0x7f;
+                    val >>= 7;
+                    if (val !== 0) byte |= 0x80;
+                    res.push(byte);
+                } while (val !== 0);
+                return res;
+            }
+
+            const magic = [0x00, 0x61, 0x73, 0x6D]; // \0asm
+            const version = [0x01, 0x00, 0x00, 0x00]; // 1
+
+            // Type section (1): 1 type, func() -> ()
+            const typeSection = [0x01, 0x04, 0x01, 0x60, 0x00, 0x00];
+
+            // Function section (3): N functions, all referencing type index 0
+            const funcSectionPayload = [n, ...Array(n).fill(0x00)]; 
+            const funcSectionBytes = [0x03, ...toLeb128(funcSectionPayload.length), ...funcSectionPayload];
+
+            // Code section (10): N function bodies
+            // Body: size 2 (leb128), locals 0, end instruction (0x0b)
+            const body = [0x02, 0x00, 0x0B];
+            const codeSectionPayload = [n];
+            for (let i = 0; i < n; i++) {
+                codeSectionPayload.push(...body);
+            }
+            const codeSectionBytes = [0x0A, ...toLeb128(codeSectionPayload.length), ...codeSectionPayload];
+
+            return new Uint8Array([
+                ...magic,
+                ...version,
+                ...typeSection,
+                ...funcSectionBytes,
+                ...codeSectionBytes
+            ]);
+        }
+
+        // --- Web Worker Setup ---
+        // The worker runs an infinite tight loop to constantly churn the V8 DefaultJobSystem
+        const workerScript = `
+            self.onmessage = function(e) {
+                if (e.data.type === 'start') {
+                    const wasmBytes = e.data.wasmBytes;
+                    // Tight loop: Intentionally designed to heavily occupy thread and job system
+                    while(true) {
+                        WebAssembly.validate(wasmBytes);
+                    }
+                }
+            };
+        `;
+        const workerBlob = new Blob([workerScript], { type: 'application/javascript' });
+        const workerUrl = URL.createObjectURL(workerBlob);
+
+        // --- App State ---
+        let workers = [];
+        let isRunning = false;
+        let validationCount = 0;
+        let wasmBytes = null;
+        let animationFrameId = null;
+
+        // DOM Elements
+        const startBtn = document.getElementById('start-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const statusInd = document.getElementById('status-indicator');
+        const counterEl = document.getElementById('validation-counter');
+        const workerInput = document.getElementById('worker-count');
+
+        // Set default workers to 2x hardware concurrency to aggressively increase contention
+        workerInput.value = (navigator.hardwareConcurrency || 4) * 2;
+
+        function updateUI() {
+            counterEl.innerText = validationCount.toLocaleString();
+            if (isRunning) {
+                animationFrameId = requestAnimationFrame(updateUI);
+            }
+        }
+
+        function mainThreadLoop() {
+            if (!isRunning) return;
+
+            // Do a batch of validations before yielding back to the event loop.
+            // This ensures we contribute heavily to the stress test while preventing
+            // standard non-bug-related UI starvation.
+            for (let i = 0; i < 50; i++) {
+                WebAssembly.validate(wasmBytes);
+                validationCount++;
+            }
+
+            // Yield to the browser's event loop
+            setTimeout(mainThreadLoop, 0);
+        }
+
+        function startStressTest() {
+            if (isRunning) return;
+            isRunning = true;
+            validationCount = 0;
+
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            workerInput.disabled = true;
+            workerInput.classList.add('opacity-50', 'cursor-not-allowed');
+            statusInd.innerText = "RUNNING (STRESSING)";
+            statusInd.classList.replace('text-gray-500', 'text-red-500');
+
+            // Generate a module with 100 functions. This is enough to trigger V8 
+            // fanning out validation to background jobs.
+            wasmBytes = generateWasmWithNFunctions(100);
+
+            // Spawn Workers up to configured limit
+            const numWorkers = parseInt(workerInput.value, 10) || 8;
+            for (let i = 0; i < numWorkers; i++) {
+                const worker = new Worker(workerUrl);
+                workers.push(worker);
+                worker.postMessage({ type: 'start', wasmBytes: wasmBytes });
+            }
+
+            // Start UI updates and Main Thread validation loop
+            requestAnimationFrame(updateUI);
+            setTimeout(mainThreadLoop, 0);
+        }
+
+        function stopStressTest() {
+            if (!isRunning) return;
+            isRunning = false;
+
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            workerInput.disabled = false;
+            workerInput.classList.remove('opacity-50', 'cursor-not-allowed');
+            statusInd.innerText = "STOPPED";
+            statusInd.classList.replace('text-red-500', 'text-gray-500');
+            
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
+
+            // Terminate all spinning workers immediately
+            workers.forEach(w => w.terminate());
+            workers = [];
+        }
+
+        startBtn.addEventListener('click', startStressTest);
+        stopBtn.addEventListener('click', stopStressTest);
+    </script>
+</body>
+</html>
