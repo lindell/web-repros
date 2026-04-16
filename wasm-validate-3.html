@@ -50,6 +50,10 @@
                         <label class="block text-sm font-medium text-gray-400 mb-1">Interference Workers Count</label>
                         <input type="number" id="workerCount" value="8" class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500 transition-colors" />
                     </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-1">Log Frequency (every N calls)</label>
+                        <input type="number" id="logFreq" value="25" class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500 transition-colors" />
+                    </div>
                 </div>
 
                 <button id="triggerBtn" class="mt-6 w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded transition-colors flex justify-center items-center gap-2">
@@ -111,6 +115,7 @@
             abortBtn: document.getElementById('abortBtn'),
             funcCount: document.getElementById('funcCount'),
             workerCount: document.getElementById('workerCount'),
+            logFreq: document.getElementById('logFreq'),
             msgQueueCount: document.getElementById('msgQueueCount'),
             spinner: document.getElementById('spinner')
         };
@@ -271,6 +276,7 @@
 
             const funcCount = parseInt(dom.funcCount.value, 10);
             const workerCount = parseInt(dom.workerCount.value, 10);
+            const logFreq = Math.max(1, parseInt(dom.logFreq.value, 10) || 25);
 
             // Give UI a moment to update before freezing
             await new Promise(r => setTimeout(r, 100));
@@ -290,11 +296,11 @@
             setTimeout(() => {
                 if (!isRunning) return;
                 log('🚨 Starting ultra-aggressive continuous validation loop...', 'warn');
-                scheduleNextValidation(wasmBuffer);
+                scheduleNextValidation(wasmBuffer, logFreq);
             }, 1000);
         }
 
-        function scheduleNextValidation(wasmBuffer) {
+        function scheduleNextValidation(wasmBuffer, logFreq) {
             if (!isRunning) return;
 
             // Yield just enough (e.g., 5ms) to let the event loop process worker 
@@ -314,7 +320,7 @@
                 const duration = (performance.now() - startTime).toFixed(2);
                 
                 // Throttle logs to avoid DOM explosion from aggressive loop
-                if (validationCount % 25 === 0 || validationCount === 1) {
+                if (validationCount % logFreq === 0 || validationCount === 1) {
                     if (isValid) {
                         log(`[Attempt ${validationCount}] Validation completed in ${duration}ms.`, 'success');
                     } else {
@@ -323,7 +329,7 @@
                 }
                 
                 // Schedule the next cycle immediately
-                scheduleNextValidation(wasmBuffer);
+                scheduleNextValidation(wasmBuffer, logFreq);
             }, 5);
         }
 
