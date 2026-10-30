@@ -10,3 +10,6 @@
 
 /agent-cluster-data.html
   Origin-Agent-Cluster: ?1
+
+/absolute-ac.js
+  Access-Control-Allow-Origin: https://no-cors.invalid
